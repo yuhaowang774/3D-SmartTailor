@@ -1,26 +1,27 @@
-"""3D-SmartTailor API — 三维人体模型生成
+"""3D-SmartTailor API — SAM 3D Body GLB 上传量体
+
 启动: uvicorn src.api:app --host 127.0.0.1 --port 8000 --reload
 """
 
-import sys, os, io, base64, tempfile
+import sys, os, base64, time, uuid
 import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 
 import yaml
-import torch
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-from input.preprocess import process_images
-from keypoint.detect import detect_keypoints
-from output.mesh_generator import generate_body_glb
+from reconstruction import create_reconstructor
+from reconstruction.glb_file import GlbFileBackend
+from measure.extract import extract_measurements
+from output.render import render_mesh_to_image
 
-with open('config.yaml', 'r', encoding='utf-8') as f:
+with open(os.path.join(os.path.dirname(__file__), '..', 'config.yaml'), 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
 
-app = FastAPI(title="3D-SmartTailor", description="3D Human Body Model Generator")
+app = FastAPI(title="3D-SmartTailor", description="3D Human Body Measurement (SAM 3D Body / GLB Upload)")
 
 static_dir = Path(__file__).parent.parent / "static"
 if static_dir.exists():
@@ -28,6 +29,16 @@ if static_dir.exists():
 
 OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
 OUTPUTS_DIR.mkdir(exist_ok=True)
+
+# 懒加载重建器 (首次请求时初始化)
+_reconstructor = None
+
+
+def get_reconstructor():
+    global _reconstructor
+    if _reconstructor is None:
+        _reconstructor = create_reconstructor(config)
+    return _reconstructor
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -40,124 +51,102 @@ async def root():
 
 @app.get("/api/health")
 async def health():
+    rec = get_reconstructor()
     return {
         "status": "ok",
-        "gpu_available": torch.cuda.is_available(),
-        "device": config.get("device", "cpu")
+        "backend": rec.backend_name,
+        "backend_available": rec.is_available(),
     }
 
 
-@app.post("/api/measure")
-async def measure(
-    front: UploadFile = File(...),
-    side: UploadFile = File(...),
-    height_cm: float = Form(...),
+@app.post("/api/measure_glb")
+async def measure_glb(
+    glb: UploadFile = File(...),
+    height_cm: float = Form(None),
 ):
     """
-    上传正面+侧面照片和身高 → 生成3D人体GLB模型 + 尺寸估算
+    上传 GLB 文件 (来自 sam3d.org) → 提取 6 项人体尺寸
 
-    返回: JSON包含
-      - measurements: 6项估算尺寸(cm)
-      - glb_url: GLB模型下载链接
-      - preview_front/side: 2D预览图
+    流程:
+      1. 接收 GLB 文件
+      2. 用 GlbFileBackend 解析为 mesh
+      3. 用身高 (可选) 归一化尺度
+      4. 从 mesh 截面提取围度 + 长度
+
+    返回 JSON:
+      - measurements: 6 项估算尺寸 (cm)
+      - glb_base64: 原始 GLB (base64, 供前端 3D 预览)
+      - preview: mesh 预览图 (base64 PNG)
+      - n_vertices / n_faces: mesh 统计
+      - processing_time_s: 处理耗时
     """
-    for field, f in [("front", front), ("side", side)]:
-        content_type = f.content_type or ""
-        if not content_type.startswith("image/"):
-            raise HTTPException(400, f"{field} must be an image file")
+    # 校验文件类型
+    filename = glb.filename or ""
+    if not (filename.lower().endswith('.glb') or filename.lower().endswith('.gltf')):
+        raise HTTPException(400, f"需要 .glb 或 .gltf 文件, 收到: {filename}")
 
-    import uuid, time
     t0 = time.time()
-
-    # 本次请求的专属输出目录
     req_id = uuid.uuid4().hex[:8]
     out_dir = OUTPUTS_DIR / req_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 保存上传文件
-    front_path = str(out_dir / "front.jpg")
-    side_path = str(out_dir / "side.jpg")
-
     try:
-        front_bytes = await front.read()
-        side_bytes = await side.read()
-        if len(front_bytes) < 500 or len(side_bytes) < 500:
-            raise HTTPException(400, "Image file too small")
-        with open(front_path, 'wb') as f:
-            f.write(front_bytes)
-        with open(side_path, 'wb') as f:
-            f.write(side_bytes)
+        glb_bytes = await glb.read()
+        if len(glb_bytes) < 500:
+            raise HTTPException(400, "GLB file too small")
 
-        # 预处理
-        data = process_images(front_path, side_path, height_cm, config)
+        # 保存 GLB
+        glb_path = str(out_dir / "body_model.glb")
+        with open(glb_path, 'wb') as f:
+            f.write(glb_bytes)
 
-        # 关键点检测
-        kp_front = detect_keypoints(data['img_front'])
-        kp_side = detect_keypoints(data['img_side'])
-        n_front = int((kp_front[:, 3] > 0.5).sum())
-        n_side = int((kp_side[:, 3] > 0.5).sum())
+        # 用 GlbFileBackend 解析
+        reconstructor = get_reconstructor()
+        if not isinstance(reconstructor, GlbFileBackend):
+            # 配置可能指向 sam3d_local, 但 GLB 上传接口始终用 GlbFileBackend
+            reconstructor = GlbFileBackend(config)
 
-        if n_front < 8:
-            raise HTTPException(400, f"Too few keypoints in front photo ({n_front}), need >= 8")
+        if not reconstructor.is_available():
+            raise HTTPException(503, f"Backend not available: {reconstructor.backend_name}")
 
-        # 生成3D人体GLB模型
-        glb_path, vertices, faces, joints = generate_body_glb(
-            kp_front, kp_side, height_cm, config, str(out_dir)
+        result = reconstructor.reconstruct_from_glb_path(glb_path)
+
+        # 尺寸提取
+        measurements = extract_measurements(
+            vertices=result.vertices,
+            faces=result.faces,
+            joints=result.joints,
+            joint_names=result.joint_names,
+            height_cm=height_cm,
         )
 
-        # 用mesh的围度计算6项尺寸(基于生成后的网格)
-        from measure.extract import extract_measurements
-        import torch as _torch
+        # 预览图
+        preview_path = str(out_dir / "preview.png")
         try:
-            measurements = extract_measurements(
-                _torch.tensor(vertices),
-                _torch.tensor(faces),
-                _torch.tensor(joints),
+            render_mesh_to_image(
+                result.vertices, result.faces,
+                preview_path,
+                title=f"GLB Analysis ({result.metadata.get('n_vertices', 0)} verts)",
             )
+            with open(preview_path, 'rb') as f:
+                preview_b64 = base64.b64encode(f.read()).decode()
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            # 提取失败时回退
-            measurements = {
-                'chest_cm': 92, 'waist_cm': 76, 'hip_cm': 96,
-                'shoulder_width_cm': 40, 'sleeve_length_cm': 58, 'pants_length_cm': 100,
-            }
-
-        # 生成2D预览图
-        from output.render import render_mesh_to_image as _render
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-
-        front_png = str(out_dir / "preview_front.png")
-        side_png = str(out_dir / "preview_side.png")
-        _render(_torch.tensor(vertices[None, ...]), _torch.tensor(faces),
-                front_png, title="Front View", elev=0, azim=0)
-        _render(_torch.tensor(vertices[None, ...]), _torch.tensor(faces),
-                side_png, title="Side View", elev=0, azim=-90)
+            print(f"[WARN] preview render failed: {e}")
+            preview_b64 = ""
 
         elapsed = time.time() - t0
-
-        # 编码预览图为base64
-        def _img_b64(path):
-            with open(path, 'rb') as fh:
-                return base64.b64encode(fh.read()).decode()
-
-        # 编码GLB为base64
-        glb_b64 = ""
-        with open(glb_path, 'rb') as fh:
-            glb_b64 = base64.b64encode(fh.read()).decode()
 
         return {
             "measurements": measurements,
             "height_cm": height_cm,
-            "glb_base64": glb_b64,
+            "glb_base64": base64.b64encode(glb_bytes).decode(),
             "glb_filename": f"body_model_{req_id}.glb",
-            "preview_front": _img_b64(front_png),
-            "preview_side": _img_b64(side_png),
-            "keypoints_front": n_front,
-            "keypoints_side": n_side,
-            "processing_time_s": round(elapsed, 1),
+            "preview": preview_b64,
+            "n_vertices": result.metadata.get('n_vertices', 0),
+            "n_faces": result.metadata.get('n_faces', 0),
+            "backend": result.metadata.get('backend', ''),
+            "processing_time_s": round(elapsed, 2),
+            "req_id": req_id,
         }
 
     except HTTPException:
@@ -170,7 +159,7 @@ async def measure(
 
 @app.get("/api/download/{req_id}")
 async def download_glb(req_id: str):
-    """下载生成的GLB模型文件"""
+    """下载已处理的 GLB 模型文件"""
     glb_path = OUTPUTS_DIR / req_id / "body_model.glb"
     if not glb_path.exists():
         raise HTTPException(404, "Model not found")

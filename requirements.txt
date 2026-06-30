@@ -1,15 +1,25 @@
-mediapipe>=0.10.0
-torch>=2.0.0
-smplx>=0.1.28
-trimesh>=4.0.0
-pyrender>=0.1.45
-opencv-python>=4.8.0
+# 3D-SmartTailor 核心依赖
 numpy>=1.24.0
 scipy>=1.11.0
+trimesh>=4.0.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
 pyyaml>=6.0
 matplotlib>=3.7.0
-Pillow>=10.0.0
-pytest>=7.0.0
+
+# Web 服务
 fastapi>=0.100.0
 uvicorn>=0.22.0
 python-multipart>=0.0.6
+
+# 本地后端 (SAM 3D Body) — 以下依赖在 external/sam-3d-body/requirements.txt 也有定义
+# torch>=2.0.0  # SAM 3D Body 依赖, 单独安装以匹配 CUDA 版本
+# detectron2    # 从 https://dl.fbaipublicfiles.com/detectron2/wheels/cu118/torch2.0/index.html 安装
+
+# 测试
+pytest>=7.0.0
+
+# 已移除:
+# - smplx, pyrender (旧 SMPL-X 方案)
+# - mediapipe (椭球方案的关键点检测, SAM 3D Body 自带)
+# - playwright (云端调用 sam3d.org 方案, 已移除)
