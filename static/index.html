@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D-SmartTailor - 三维人体量体</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, 'Microsoft YaHei', sans-serif;
+  background: #0f0f1a;
+  color: #e0e0e0;
+  min-height: 100vh;
+}
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+h1 {
+  text-align: center;
+  font-size: 28px;
+  padding: 30px 0 20px;
+  color: #7c8cf8;
+}
+.upload-area {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: 30px;
+}
+.upload-box {
+  width: 300px;
+  border: 2px dashed #444;
+  border-radius: 12px;
+  padding: 30px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.3s;
+  position: relative;
+}
+.upload-box:hover { border-color: #7c8cf8; }
+.upload-box.has-image { border-color: #4caf50; border-style: solid; }
+.upload-box img {
+  max-width: 100%;
+  max-height: 200px;
+  display: block;
+  margin: 0 auto;
+}
+.upload-box .placeholder {
+  color: #666;
+  font-size: 14px;
+}
+.height-input {
+  text-align: center;
+  margin-bottom: 20px;
+}
+.height-input input {
+  width: 120px;
+  padding: 8px 12px;
+  font-size: 16px;
+  border: 1px solid #444;
+  border-radius: 6px;
+  background: #1a1a2e;
+  color: #fff;
+  text-align: center;
+}
+.height-input label { margin-right: 10px; color: #999; }
+.btn {
+  display: block;
+  margin: 0 auto 30px;
+  padding: 14px 50px;
+  font-size: 18px;
+  background: #7c8cf8;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity 0.3s;
+}
+.btn:hover { opacity: 0.9; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.result-area {
+  display: none;
+  gap: 20px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.result-area.show { display: flex; }
+.measure-panel {
+  background: #1a1a2e;
+  border-radius: 12px;
+  padding: 20px;
+  width: 280px;
+}
+.measure-panel h3 { color: #7c8cf8; margin-bottom: 15px; }
+.measure-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid #2a2a3e;
+}
+.measure-row .label { color: #999; }
+.measure-row .value { color: #fff; font-weight: 600; }
+.viewer-panel {
+  background: #1a1a2e;
+  border-radius: 12px;
+  width: 560px;
+  height: 450px;
+  position: relative;
+}
+#three-canvas { width: 100%; height: 100%; border-radius: 12px; }
+.dl-btn {
+  display: block;
+  margin: 15px auto 0;
+  padding: 10px 30px;
+  background: #4caf50;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.loading {
+  text-align: center;
+  padding: 40px;
+  color: #999;
+}
+.error {
+  text-align: center;
+  padding: 20px;
+  color: #f44336;
+}
+.spinner {
+  display: inline-block;
+  width: 40px; height: 40px;
+  border: 3px solid #333;
+  border-top-color: #7c8cf8;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>3D-SmartTailor 三维人体量体</h1>
+
+  <div class="upload-area">
+    <div class="upload-box" id="upload-front">
+      <input type="file" accept="image/*" hidden id="file-front">
+      <img id="preview-front" style="display:none">
+      <div class="placeholder">点击上传正面全身照</div>
+    </div>
+    <div class="upload-box" id="upload-side">
+      <input type="file" accept="image/*" hidden id="file-side">
+      <img id="preview-side" style="display:none">
+      <div class="placeholder">点击上传侧面全身照</div>
+    </div>
+  </div>
+
+  <div class="height-input">
+    <label>身高 (cm):</label>
+    <input type="number" id="height-cm" value="170" min="100" max="250" step="0.1">
+  </div>
+
+  <button class="btn" id="start-btn" onclick="startMeasure()">开始测量</button>
+
+  <div class="loading" id="loading" style="display:none">
+    <div class="spinner"></div>
+    <p style="margin-top:15px">正在生成三维人体模型...</p>
+  </div>
+
+  <div class="error" id="error" style="display:none"></div>
+
+  <div class="result-area" id="result-area">
+    <div class="measure-panel" id="measure-panel"></div>
+    <div class="viewer-panel">
+      <div id="three-canvas"></div>
+    </div>
+    <div style="text-align:center;width:100%">
+      <button class="dl-btn" id="dl-btn" style="display:none" onclick="downloadGLB()">下载 GLB 三维模型</button>
+      <p style="color:#666;margin-top:8px;font-size:12px">GLB文件可用 Windows 3D查看器 / Blender 打开</p>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160/examples/jsm/" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+let scene, camera, renderer, controls, model;
+
+function init3D() {
+  const container = document.getElementById('three-canvas');
+  if (!container) return;
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1a1a2e);
+
+  camera = new THREE.PerspectiveCamera(45, container.clientWidth/container.clientHeight, 0.01, 10);
+  camera.position.set(0, 0.8, 2.5);
+  camera.lookAt(0, 0.5, 0);
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  container.appendChild(renderer.domElement);
+
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 0.5, 0);
+  controls.enableDamping = true;
+  controls.update();
+
+  // 光照
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const dl = new THREE.DirectionalLight(0xffffff, 1.0);
+  dl.position.set(1, 2, 2);
+  scene.add(dl);
+  const dl2 = new THREE.DirectionalLight(0xffffff, 0.4);
+  dl2.position.set(-1, 1, -1);
+  scene.add(dl2);
+
+  // 地面参考线
+  const grid = new THREE.GridHelper(2, 20, 0x444466, 0x222244);
+  grid.position.y = -0.9;
+  scene.add(grid);
+
+  animate();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  if (controls) controls.update();
+  if (renderer && scene && camera) renderer.render(scene, camera);
+}
+
+window.loadGLB = function(glbBase64) {
+  if (model) { scene.remove(model); model = null; }
+
+  const binStr = atob(glbBase64);
+  const bytes = new Uint8Array(binStr.length);
+  for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+
+  const loader = new GLTFLoader();
+  loader.parse(bytes.buffer, '', (gltf) => {
+    model = gltf.scene;
+    scene.add(model);
+
+    // 居中摆放
+    const box = new THREE.Box3().setFromObject(model);
+    const center = box.getCenter(new THREE.Vector3());
+    model.position.set(-center.x, -center.y + 0.1, -center.z);
+  });
+};
+
+window.addEventListener('resize', () => {
+  const c = document.getElementById('three-canvas');
+  if (c && renderer) {
+    camera.aspect = c.clientWidth / c.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(c.clientWidth, c.clientHeight);
+  }
+});
+
+// 初始化3D场景
+init3D();
+</script>
+
+<script>
+let glbData = null;
+
+document.getElementById('upload-front').onclick = () => document.getElementById('file-front').click();
+document.getElementById('upload-side').onclick = () => document.getElementById('file-side').click();
+
+document.getElementById('file-front').onchange = e => {
+  const f = e.target.files[0];
+  if (f) {
+    document.getElementById('preview-front').src = URL.createObjectURL(f);
+    document.getElementById('preview-front').style.display = 'block';
+    document.getElementById('upload-front').querySelector('.placeholder').style.display = 'none';
+    document.getElementById('upload-front').classList.add('has-image');
+  }
+};
+document.getElementById('file-side').onchange = e => {
+  const f = e.target.files[0];
+  if (f) {
+    document.getElementById('preview-side').src = URL.createObjectURL(f);
+    document.getElementById('preview-side').style.display = 'block';
+    document.getElementById('upload-side').querySelector('.placeholder').style.display = 'none';
+    document.getElementById('upload-side').classList.add('has-image');
+  }
+};
+
+window.startMeasure = async function() {
+  const frontFile = document.getElementById('file-front').files[0];
+  const sideFile = document.getElementById('file-side').files[0];
+  const h = document.getElementById('height-cm').value;
+
+  if (!frontFile || !sideFile) { alert('请上传正面和侧面照片'); return; }
+
+  document.getElementById('loading').style.display = 'block';
+  document.getElementById('error').style.display = 'none';
+  document.getElementById('result-area').classList.remove('show');
+  document.getElementById('start-btn').disabled = true;
+
+  const fd = new FormData();
+  fd.append('front', frontFile);
+  fd.append('side', sideFile);
+  fd.append('height_cm', h);
+
+  try {
+    const res = await fetch('/api/measure', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Unknown error');
+
+    // 显示测量结果
+    const m = data.measurements;
+    document.getElementById('measure-panel').innerHTML = `
+      <h3>测量结果</h3>
+      <div class="measure-row"><span class="label">身高</span><span class="value">${data.height_cm}cm</span></div>
+      <div class="measure-row"><span class="label">胸围</span><span class="value">${m.chest_cm || '-'}cm</span></div>
+      <div class="measure-row"><span class="label">腰围</span><span class="value">${m.waist_cm || '-'}cm</span></div>
+      <div class="measure-row"><span class="label">臀围</span><span class="value">${m.hip_cm || '-'}cm</span></div>
+      <div class="measure-row"><span class="label">肩宽</span><span class="value">${m.shoulder_width_cm || '-'}cm</span></div>
+      <div class="measure-row"><span class="label">袖长</span><span class="value">${m.sleeve_length_cm || '-'}cm</span></div>
+      <div class="measure-row"><span class="label">裤长</span><span class="value">${m.pants_length_cm || '-'}cm</span></div>
+      <div style="margin-top:12px;font-size:12px;color:#666">
+        耗时: ${data.processing_time_s}s | 关键点: ${data.keypoints_front}
+      </div>
+    `;
+
+    // 加载3D模型
+    if (data.glb_base64) {
+      glbData = data.glb_base64;
+      window.loadGLB(data.glb_base64);
+      document.getElementById('dl-btn').style.display = 'block';
+    }
+
+    document.getElementById('result-area').classList.add('show');
+  } catch (err) {
+    document.getElementById('error').textContent = '处理失败: ' + err.message;
+    document.getElementById('error').style.display = 'block';
+  } finally {
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('start-btn').disabled = false;
+  }
+};
+
+window.downloadGLB = function() {
+  if (!glbData) return;
+  const byteChars = atob(glbData);
+  const bytes = new Uint8Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+  const blob = new Blob([bytes], { type: 'model/gltf-binary' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'body_model.glb';
+  a.click();
+  URL.revokeObjectURL(url);
+};
+</script>
+
+</body>
+</html>

@@ -1,36 +1,23 @@
+# Data & outputs (large files)
+data/
+outputs/
+
+# Test images
+*.jpg
+*.jpeg
+*.png
+
 # Python
 __pycache__/
-*.py[cod]
-*.so
-*.egg
+*.pyc
+*.pyo
 *.egg-info/
-dist/
-*.whl
+.pytest_cache/
 
-# Virtual environments
-venv/
-.venv/
-env/
+# Model files (download separately)
+src/keypoint/model/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
+# IDE & OS
 .DS_Store
 Thumbs.db
-
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Node
-node_modules/
-
-# Build
-build/
-*.log
+.ipynb_checkpoints/

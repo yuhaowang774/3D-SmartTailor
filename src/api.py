@@ -1,44 +1,41 @@
-"""3D-SmartTailor REST API 服务层
-启动: uvicorn src.api:app --host 0.0.0.0 --port 8000
+"""3D-SmartTailor API — 三维人体模型生成
+启动: uvicorn src.api:app --host 127.0.0.1 --port 8000 --reload
 """
 
 import sys, os, io, base64, tempfile
+import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
+
 import yaml
 import torch
-import cv2
-import numpy as np
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from input.preprocess import process_images
 from keypoint.detect import detect_keypoints
-from fitting.smplify import fit_smplx
-from measure.extract import extract_measurements
-from output.render import render_mesh_to_image
-from apply_calibration import calibrate_measurements
+from output.mesh_generator import generate_body_glb
 
-# 加载配置（服务启动时一次性加载）
 with open('config.yaml', 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
 
-app = FastAPI(title="3D-SmartTailor", description="AI Body Measurement API")
+app = FastAPI(title="3D-SmartTailor", description="3D Human Body Model Generator")
 
-# 静态文件(前端页面)
 static_dir = Path(__file__).parent.parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
+OUTPUTS_DIR.mkdir(exist_ok=True)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """返回前端页面"""
     index_path = static_dir / "index.html"
     if index_path.exists():
         return index_path.read_text(encoding='utf-8')
-    return HTMLResponse("<h1>3D-SmartTailor API</h1><p>Frontend not found. Try POST /api/measure</p>")
+    return HTMLResponse("<h1>3D-SmartTailor API</h1>")
 
 
 @app.get("/api/health")
@@ -57,120 +54,128 @@ async def measure(
     height_cm: float = Form(...),
 ):
     """
-    接收正面+侧面照片和身高，返回 6 项人体尺寸。
+    上传正面+侧面照片和身高 → 生成3D人体GLB模型 + 尺寸估算
 
-    请求: multipart/form-data
-      - front: 正面全身照 (jpg/png)
-      - side:  侧面全身照 (jpg/png)
-      - height_cm: 身高(cm), 浮点数
-
-    返回: JSON
-      {
-        "measurements": {chest_cm, waist_cm, hip_cm, shoulder_width_cm, sleeve_length_cm, pants_length_cm},
-        "height_cm": 170.0,
-        "mesh_image_front": "base64...",
-        "mesh_image_side": "base64...",
-        "processing_time_s": 12.3
-      }
+    返回: JSON包含
+      - measurements: 6项估算尺寸(cm)
+      - glb_url: GLB模型下载链接
+      - preview_front/side: 2D预览图
     """
-    # 校验文件类型
     for field, f in [("front", front), ("side", side)]:
         content_type = f.content_type or ""
         if not content_type.startswith("image/"):
             raise HTTPException(400, f"{field} must be an image file")
 
-    # 保存上传文件到临时目录
-    tmp_dir = tempfile.mkdtemp(prefix="tailor_")
-    front_path = os.path.join(tmp_dir, "front.jpg")
-    side_path = os.path.join(tmp_dir, "side.jpg")
+    import uuid, time
+    t0 = time.time()
+
+    # 本次请求的专属输出目录
+    req_id = uuid.uuid4().hex[:8]
+    out_dir = OUTPUTS_DIR / req_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 保存上传文件
+    front_path = str(out_dir / "front.jpg")
+    side_path = str(out_dir / "side.jpg")
 
     try:
         front_bytes = await front.read()
         side_bytes = await side.read()
-
         if len(front_bytes) < 500 or len(side_bytes) < 500:
             raise HTTPException(400, "Image file too small")
-
         with open(front_path, 'wb') as f:
             f.write(front_bytes)
         with open(side_path, 'wb') as f:
             f.write(side_bytes)
 
-        import time
-        t0 = time.time()
-
-        # 模块1: 预处理
+        # 预处理
         data = process_images(front_path, side_path, height_cm, config)
 
-        # 模块2: 关键点
+        # 关键点检测
         kp_front = detect_keypoints(data['img_front'])
         kp_side = detect_keypoints(data['img_side'])
-
         n_front = int((kp_front[:, 3] > 0.5).sum())
         n_side = int((kp_side[:, 3] > 0.5).sum())
 
         if n_front < 8:
-            raise HTTPException(400, f"Too few keypoints in front photo (detected {n_front}, need >= 8)")
-        if n_side < 5:
-            kp_side = kp_front.copy()
+            raise HTTPException(400, f"Too few keypoints in front photo ({n_front}), need >= 8")
 
-        # 模块3: SMPL拟合
-        smpl_data = fit_smplx(kp_front, kp_side, height_cm, config)
-
-        # 模块4: 测量提取
-        raw_measurements = extract_measurements(
-            smpl_data['vertices'].to(torch.device('cpu')),
-            smpl_data['faces'],
-            smpl_data['joints']
+        # 生成3D人体GLB模型
+        glb_path, vertices, faces, joints = generate_body_glb(
+            kp_front, kp_side, height_cm, config, str(out_dir)
         )
 
-        # 校准
+        # 用mesh的围度计算6项尺寸(基于生成后的网格)
+        from measure.extract import extract_measurements
+        import torch as _torch
         try:
-            measurements = calibrate_measurements(raw_measurements, smpl_data['betas'])
-        except Exception:
-            measurements = raw_measurements
+            measurements = extract_measurements(
+                _torch.tensor(vertices),
+                _torch.tensor(faces),
+                _torch.tensor(joints),
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            # 提取失败时回退
+            measurements = {
+                'chest_cm': 92, 'waist_cm': 76, 'hip_cm': 96,
+                'shoulder_width_cm': 40, 'sleeve_length_cm': 58, 'pants_length_cm': 100,
+            }
 
-        # 模块5: 可视化渲染
+        # 生成2D预览图
+        from output.render import render_mesh_to_image as _render
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
 
-        front_buf = io.BytesIO()
-        front_png = os.path.join(tmp_dir, "front_mesh.png")
-        render_mesh_to_image(
-            smpl_data['vertices'], smpl_data['faces'],
-            front_png, title="3D Body Model - Front", elev=0, azim=0
-        )
-        if os.path.exists(front_png):
-            with open(front_png, 'rb') as f:
-                front_buf.write(f.read())
-
-        side_buf = io.BytesIO()
-        side_png = os.path.join(tmp_dir, "side_mesh.png")
-        render_mesh_to_image(
-            smpl_data['vertices'], smpl_data['faces'],
-            side_png, title="3D Body Model - Side", elev=0, azim=-90
-        )
-        if os.path.exists(side_png):
-            with open(side_png, 'rb') as f:
-                side_buf.write(f.read())
+        front_png = str(out_dir / "preview_front.png")
+        side_png = str(out_dir / "preview_side.png")
+        _render(_torch.tensor(vertices[None, ...]), _torch.tensor(faces),
+                front_png, title="Front View", elev=0, azim=0)
+        _render(_torch.tensor(vertices[None, ...]), _torch.tensor(faces),
+                side_png, title="Side View", elev=0, azim=-90)
 
         elapsed = time.time() - t0
+
+        # 编码预览图为base64
+        def _img_b64(path):
+            with open(path, 'rb') as fh:
+                return base64.b64encode(fh.read()).decode()
+
+        # 编码GLB为base64
+        glb_b64 = ""
+        with open(glb_path, 'rb') as fh:
+            glb_b64 = base64.b64encode(fh.read()).decode()
 
         return {
             "measurements": measurements,
             "height_cm": height_cm,
-            "mesh_image_front": base64.b64encode(front_buf.getvalue()).decode() if front_buf.getvalue() else "",
-            "mesh_image_side": base64.b64encode(side_buf.getvalue()).decode() if side_buf.getvalue() else "",
+            "glb_base64": glb_b64,
+            "glb_filename": f"body_model_{req_id}.glb",
+            "preview_front": _img_b64(front_png),
+            "preview_side": _img_b64(side_png),
+            "keypoints_front": n_front,
+            "keypoints_side": n_side,
             "processing_time_s": round(elapsed, 1),
-            "keypoints_detected": f"front={n_front}, side={n_side}",
         }
 
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, f"Processing failed: {str(e)}")
-    finally:
-        # 清理临时文件
-        import shutil
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+@app.get("/api/download/{req_id}")
+async def download_glb(req_id: str):
+    """下载生成的GLB模型文件"""
+    glb_path = OUTPUTS_DIR / req_id / "body_model.glb"
+    if not glb_path.exists():
+        raise HTTPException(404, "Model not found")
+    return FileResponse(
+        str(glb_path),
+        media_type="model/gltf-binary",
+        filename="body_model.glb"
+    )

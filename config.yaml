@@ -1,0 +1,26 @@
+model:
+  smplx_path: "data/body_models/smplx/models/smplx"
+  model_type: "smplx"
+  gender: "neutral"
+
+fitting:
+  stage1_iterations: 100
+  stage2_iterations: 50
+  stage3_iterations: 50
+  loss_weights:
+    keypoint: 1.0
+    reg_pose: 0.001
+    reg_shape: 0.01
+    height: 10.0
+
+input:
+  target_short_side: 1024
+  min_resolution: 512
+  crop_margin: 0.1
+
+output:
+  render_mesh: true
+  render_sections: true
+
+device: "cuda"
+gpu_id: 0
