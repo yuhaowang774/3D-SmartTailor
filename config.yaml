@@ -1,37 +1,34 @@
-# 3D-SmartTailor 配置 — SAM 3D Body 方案
-# 旧椭球/SMPL-X 配置已完全移除
+# 3D-SmartTailor 配置 — 多后端 3D 人体量体
 
 # ===== 3D 人体重建 =====
 reconstruction:
   # 后端选择:
-  #   'glb_file':    GLB 文件上传 (默认, 即开即用, 需用户先用 sam3d.org 生成 GLB)
-  #   'sam3d_local': 本地部署 SAM 3D Body (推荐, 需 HuggingFace 权限 + 模型下载)
+  #   'glb_file':    GLB 文件上传 (默认, 即开即用)
+  #   'pifuhd_local': PIFuHD 本地推理 (单张照片 → 3D mesh, 需 GPU + 模型)
   backend: "glb_file"
 
-  # --- 本地后端配置 (HuggingFace 权限通过后切换) ---
-  sam3d_local:
-    # 模型 checkpoint 路径 (下载自 HuggingFace)
-    checkpoint_path: "checkpoints/sam-3d-body-dinov3/model.ckpt"
-    # MHR 参数化模型路径
-    mhr_path: "checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt"
-    # 推理设备: 'cuda' (推荐) 或 'cpu' (非常慢)
+  # --- PIFuHD 本地后端 ---
+  pifuhd_local:
+    # 预训练模型路径 (运行 scripts/download_trained_model.sh 后自动下载)
+    checkpoint_path: "external/pifuhd/checkpoints/pifuhd.pt"
+    # 推理设备: 'cuda' (推荐, 需 8GB+ 显存) 或 'cpu' (非常慢)
     device: "cuda"
+    # 输出分辨率 (512 默认, 越高越精细但越慢)
+    resolution: 512
 
 # ===== 输入预处理 =====
 input:
-  # 长边缩放到此分辨率 (减少推理时间)
   target_long_side: 1024
   min_resolution: 512
 
 # ===== 输出 =====
 output:
-  # 生成 mesh 预览图
   render_mesh: true
-  # 生成正/侧面 2 视图预览
   render_views: true
-  # 导出 GLB
   export_glb: true
 
 # ===== 设备 =====
 device: "cuda"
 gpu_id: 0
+
+

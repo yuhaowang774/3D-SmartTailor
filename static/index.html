@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>3D-SmartTailor - GLB 人体量体</title>
+<title>3D-SmartTailor - 3D 人体量体</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -20,7 +20,7 @@ body {
 h1 {
   text-align: center;
   font-size: 28px;
-  padding: 30px 0 20px;
+  padding: 30px 0 10px;
   color: #7c8cf8;
 }
 .subtitle {
@@ -29,15 +29,51 @@ h1 {
   margin-bottom: 20px;
   font-size: 13px;
 }
-.steps {
+.mode-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 25px;
+}
+.mode-tab {
+  padding: 12px 28px;
+  background: #1a1a2e;
+  border: 2px solid #333;
+  border-radius: 8px;
+  color: #888;
+  cursor: pointer;
+  font-size: 15px;
+  transition: all 0.3s;
+}
+.mode-tab:hover { border-color: #555; color: #aaa; }
+.mode-tab.active {
+  background: #7c8cf8;
+  border-color: #7c8cf8;
+  color: #fff;
+}
+.mode-tab.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.mode-tab .badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  border-radius: 4px;
+  background: #4caf50;
+  color: #fff;
+}
+.mode-tab .badge.offline { background: #f44336; }
+.mode-info {
   text-align: center;
   color: #888;
-  font-size: 13px;
-  margin-bottom: 25px;
-  line-height: 1.8;
+  font-size: 12px;
+  margin-bottom: 20px;
+  line-height: 1.6;
 }
-.steps a { color: #7c8cf8; text-decoration: none; }
-.steps a:hover { text-decoration: underline; }
+.mode-info a { color: #7c8cf8; text-decoration: none; }
+.mode-info a:hover { text-decoration: underline; }
 .upload-area {
   display: flex;
   gap: 20px;
@@ -137,6 +173,13 @@ h1 {
   padding: 20px;
   width: 280px;
 }
+.preview-panel h3 { color: #7c8cf8; margin-bottom: 10px; }
+.preview-panel img {
+  max-width: 100%;
+  border-radius: 8px;
+  display: block;
+  margin: 0 auto;
+}
 .dl-btn {
   display: block;
   margin: 15px auto 0;
@@ -157,6 +200,7 @@ h1 {
   text-align: center;
   padding: 20px;
   color: #f44336;
+  white-space: pre-wrap;
 }
 .spinner {
   display: inline-block;
@@ -172,20 +216,38 @@ h1 {
 <body>
 
 <div class="container">
-  <h1>3D-SmartTailor — GLB 人体量体</h1>
-  <p class="subtitle">上传 SAM 3D Body 生成的 GLB 文件，自动提取 6 项人体尺寸</p>
-  <div class="steps">
-    使用流程：<br>
-    1. 访问 <a href="https://sam3d.org/zh/sam-3d-body" target="_blank">sam3d.org</a> 上传照片生成 3D 模型<br>
-    2. 下载 GLB 文件后，在此页面上传该 GLB 文件
+  <h1>3D-SmartTailor — 3D 人体量体</h1>
+  <p class="subtitle">上传 GLB 文件或单张照片，自动提取 6 项人体尺寸</p>
+
+  <div class="mode-tabs">
+    <div class="mode-tab active" id="tab-glb" onclick="switchMode('glb_file')">
+      GLB 文件上传 <span class="badge">可用</span>
+    </div>
+    <div class="mode-tab" id="tab-pifuhd" onclick="switchMode('pifuhd_local')">
+      照片重建 (PIFuHD) <span class="badge offline" id="pifuhd-badge">离线</span>
+    </div>
+  </div>
+  <div class="mode-info" id="mode-info"></div>
+
+  <div id="glb-upload-area">
+    <div class="upload-area">
+      <div class="upload-box" id="upload-glb">
+        <input type="file" accept=".glb,.gltf" hidden id="glb-file">
+        <div class="file-icon">📁</div>
+        <div class="placeholder">点击上传 GLB 文件</div>
+        <div class="filename" id="filename-display" style="display:none"></div>
+      </div>
+    </div>
   </div>
 
-  <div class="upload-area">
-    <div class="upload-box" id="upload-glb">
-      <input type="file" accept=".glb,.gltf" hidden id="glb-file">
-      <div class="file-icon">📁</div>
-      <div class="placeholder">点击上传 GLB 文件</div>
-      <div class="filename" id="filename-display" style="display:none"></div>
+  <div id="image-upload-area" style="display:none">
+    <div class="upload-area">
+      <div class="upload-box" id="upload-image">
+        <input type="file" accept="image/*" hidden id="image-file">
+        <div class="file-icon">📸</div>
+        <div class="placeholder" id="image-placeholder">点击上传人体照片</div>
+        <div class="filename" id="image-filename-display" style="display:none"></div>
+      </div>
     </div>
   </div>
 
@@ -198,7 +260,7 @@ h1 {
 
   <div class="loading" id="loading" style="display:none">
     <div class="spinner"></div>
-    <p style="margin-top:15px">正在分析 3D 模型...</p>
+    <p style="margin-top:15px" id="loading-text">正在分析...</p>
   </div>
 
   <div class="error" id="error" style="display:none"></div>
@@ -209,11 +271,11 @@ h1 {
       <div id="three-canvas"></div>
     </div>
     <div class="preview-panel" id="preview-panel" style="display:none">
-      <h3 style="color:#7c8cf8;margin-bottom:10px">预览图</h3>
-      <img id="preview-image" style="max-width:100%;border-radius:8px;display:block;margin:0 auto">
+      <h3>预览图</h3>
+      <img id="preview-image">
     </div>
     <div style="text-align:center;width:100%">
-      <button class="dl-btn" id="dl-btn" style="display:none;background:#4caf50" onclick="downloadGLB()">下载 GLB 模型</button>
+      <button class="dl-btn" id="dl-btn" style="display:none" onclick="downloadGLB()">下载 GLB 模型</button>
     </div>
   </div>
 </div>
@@ -251,7 +313,6 @@ function init3D() {
   controls.enableDamping = true;
   controls.update();
 
-  // 光照
   scene.add(new THREE.AmbientLight(0xffffff, 0.6));
   const dl = new THREE.DirectionalLight(0xffffff, 1.0);
   dl.position.set(1, 2, 2);
@@ -260,7 +321,6 @@ function init3D() {
   dl2.position.set(-1, 1, -1);
   scene.add(dl2);
 
-  // 地面参考线
   const grid = new THREE.GridHelper(2, 20, 0x444466, 0x222244);
   grid.position.y = -0.9;
   scene.add(grid);
@@ -286,12 +346,11 @@ window.loadGLB = function(glbBase64) {
     model = gltf.scene;
     scene.add(model);
 
-    // 居中 + 自适应缩放
     const box = new THREE.Box3().setFromObject(model);
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
-    const scale = 1.7 / maxDim;  // 标准化到约 1.7m 高
+    const scale = 1.7 / maxDim;
     model.scale.setScalar(scale);
     model.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
   });
@@ -306,16 +365,56 @@ window.addEventListener('resize', () => {
   }
 });
 
-// 初始化3D场景
 init3D();
 </script>
 
 <script>
+let currentMode = 'glb_file';
 let glbData = null;
 
-// GLB 文件上传交互
-document.getElementById('upload-glb').onclick = () => document.getElementById('glb-file').click();
+// 模式切换: mode 值与后端 backend_name 一致 (glb_file / pifuhd_local)
+window.switchMode = function(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
+  const tabId = mode === 'glb_file' ? 'tab-glb' : 'tab-pifuhd';
+  document.getElementById(tabId).classList.add('active');
 
+  document.getElementById('glb-upload-area').style.display = (mode === 'glb_file') ? 'block' : 'none';
+  document.getElementById('image-upload-area').style.display = (mode !== 'glb_file') ? 'block' : 'none';
+
+  const info = document.getElementById('mode-info');
+  if (mode === 'glb_file') {
+    info.innerHTML = '访问 <a href="https://sam3d.org/zh/sam-3d-body" target="_blank">sam3d.org</a> 上传照片生成 3D 模型，下载 GLB 后在此上传';
+  } else if (mode === 'pifuhd_local') {
+    info.innerHTML = 'PIFuHD 本地推理：单张照片直接生成 3D 模型 (CPU 模式约需 1 分钟)';
+  }
+};
+
+// 查询后端可用性
+async function checkBackends() {
+  try {
+    const res = await fetch('/api/backends');
+    const data = await res.json();
+    data.backends.forEach(b => {
+      if (b.name === 'pifuhd_local') {
+        const badge = document.getElementById('pifuhd-badge');
+        const tab = document.getElementById('tab-pifuhd');
+        if (b.available) {
+          badge.textContent = '可用';
+          badge.classList.remove('offline');
+        } else {
+          badge.textContent = '离线';
+          badge.classList.add('offline');
+          tab.classList.add('disabled');
+        }
+      }
+    });
+  } catch (e) {
+    console.warn('无法查询后端状态:', e);
+  }
+}
+
+document.getElementById('upload-glb').onclick = () => document.getElementById('glb-file').click();
 document.getElementById('glb-file').onchange = e => {
   const f = e.target.files[0];
   if (f) {
@@ -327,17 +426,40 @@ document.getElementById('glb-file').onchange = e => {
   }
 };
 
+document.getElementById('upload-image').onclick = () => document.getElementById('image-file').click();
+document.getElementById('image-file').onchange = e => {
+  const f = e.target.files[0];
+  if (f) {
+    const display = document.getElementById('image-filename-display');
+    display.textContent = '✓ ' + f.name + ' (' + (f.size/1024).toFixed(0) + ' KB)';
+    display.style.display = 'block';
+    document.getElementById('image-placeholder').style.display = 'none';
+    document.getElementById('upload-image').classList.add('has-file');
+  }
+};
+
 window.startMeasure = async function() {
-  const glbFile = document.getElementById('glb-file').files[0];
   const h = document.getElementById('height').value;
+  let fd = new FormData();
+  let endpoint;
 
-  if (!glbFile) { alert('请上传 GLB 文件'); return; }
-
-  // 校验扩展名
-  const name = glbFile.name.toLowerCase();
-  if (!name.endsWith('.glb') && !name.endsWith('.gltf')) {
-    alert('请上传 .glb 或 .gltf 文件');
-    return;
+  if (currentMode === 'glb_file') {
+    const glbFile = document.getElementById('glb-file').files[0];
+    if (!glbFile) { alert('请上传 GLB 文件'); return; }
+    const name = glbFile.name.toLowerCase();
+    if (!name.endsWith('.glb') && !name.endsWith('.gltf')) { alert('请上传 .glb 或 .gltf 文件'); return; }
+    fd.append('glb', glbFile);
+    if (h) fd.append('height_cm', h);
+    endpoint = '/api/measure_glb';
+    document.getElementById('loading-text').textContent = '正在分析 GLB 模型...';
+  } else {
+    const imgFile = document.getElementById('image-file').files[0];
+    if (!imgFile) { alert('请上传图片'); return; }
+    fd.append('image', imgFile);
+    if (h) fd.append('height_cm', h);
+    fd.append('backend', currentMode);  // currentMode === 'pifuhd_local'
+    endpoint = '/api/measure_image';
+    document.getElementById('loading-text').textContent = '正在重建 3D 模型 (可能需要 1-3 分钟)...';
   }
 
   document.getElementById('loading').style.display = 'block';
@@ -345,17 +467,11 @@ window.startMeasure = async function() {
   document.getElementById('result-area').classList.remove('show');
   document.getElementById('start-btn').disabled = true;
 
-  // 构造表单：GLB 文件 + 可选身高
-  const fd = new FormData();
-  fd.append('glb', glbFile);
-  if (h) fd.append('height_cm', h);
-
   try {
-    const res = await fetch('/api/measure_glb', { method: 'POST', body: fd });
+    const res = await fetch(endpoint, { method: 'POST', body: fd });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Unknown error');
 
-    // 显示 6 项尺寸测量结果
     const m = data.measurements;
     document.getElementById('measure-panel').innerHTML = `
       <h3>测量结果</h3>
@@ -372,14 +488,12 @@ window.startMeasure = async function() {
       </div>
     `;
 
-    // 加载 3D 模型并显示下载按钮
     if (data.glb_base64) {
       glbData = data.glb_base64;
       window.loadGLB(data.glb_base64);
       document.getElementById('dl-btn').style.display = 'block';
     }
 
-    // 显示预览图
     if (data.preview) {
       document.getElementById('preview-image').src = 'data:image/png;base64,' + data.preview;
       document.getElementById('preview-panel').style.display = 'block';
@@ -410,6 +524,8 @@ window.downloadGLB = function() {
   a.click();
   URL.revokeObjectURL(url);
 };
+
+checkBackends();
 </script>
 
 </body>

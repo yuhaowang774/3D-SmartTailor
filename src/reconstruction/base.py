@@ -59,11 +59,45 @@ def create_reconstructor(config: dict) -> BodyReconstructor:
     """根据配置创建重建器实例"""
     backend = config.get('reconstruction', {}).get('backend', 'glb_file')
 
-    if backend == 'sam3d_local':
-        from .sam3d_local import Sam3dLocalBackend
-        return Sam3dLocalBackend(config)
+    if backend == 'pifuhd_local':
+        from .pifuhd_local import PifuhdLocalBackend
+        return PifuhdLocalBackend(config)
     elif backend == 'glb_file':
         from .glb_file import GlbFileBackend
         return GlbFileBackend(config)
     else:
         raise ValueError(f"Unknown reconstruction backend: {backend}")
+
+
+def list_available_backends(config: dict) -> list:
+    """列出所有后端及其可用性状态
+
+    Returns:
+        [{"name": "glb_file", "available": True, "label": "GLB 上传"}, ...]
+    """
+    backends = []
+    # GLB 上传 (始终可用)
+    backends.append({
+        'name': 'glb_file',
+        'available': True,
+        'label': 'GLB 文件上传',
+        'description': '上传 sam3d.org 生成的 GLB 文件',
+    })
+    # PIFuHD 本地
+    try:
+        from .pifuhd_local import PifuhdLocalBackend
+        p = PifuhdLocalBackend(config)
+        backends.append({
+            'name': 'pifuhd_local',
+            'available': p.is_available(),
+            'label': 'PIFuHD 图片重建',
+            'description': '单张照片本地生成 3D 模型 (需 GPU + 模型)',
+        })
+    except Exception:
+        backends.append({
+            'name': 'pifuhd_local',
+            'available': False,
+            'label': 'PIFuHD 图片重建',
+            'description': '单张照片本地生成 3D 模型 (需 GPU + 模型)',
+        })
+    return backends

@@ -12,14 +12,29 @@ fastapi>=0.100.0
 uvicorn>=0.22.0
 python-multipart>=0.0.6
 
-# 本地后端 (SAM 3D Body) — 以下依赖在 external/sam-3d-body/requirements.txt 也有定义
-# torch>=2.0.0  # SAM 3D Body 依赖, 单独安装以匹配 CUDA 版本
-# detectron2    # 从 https://dl.fbaipublicfiles.com/detectron2/wheels/cu118/torch2.0/index.html 安装
-
 # 测试
 pytest>=7.0.0
 
+# ============================================================
+# 可选后端依赖 (按需安装)
+# ============================================================
+
+# --- PIFuHD 本地后端 (单张照片 → 3D mesh) ---
+# 先克隆仓库: git clone https://github.com/facebookresearch/pifuhd external/pifuhd
+# 再安装其依赖: pip install -r external/pifuhd/requirements.txt
+# 关键依赖 (与主项目共用的 torch):
+#   torch>=1.4.0 (推荐 2.0+, 需匹配 CUDA 版本)
+#   scikit-image
+#   tqdm
+# 下载预训练模型: cd external/pifuhd && sh scripts/download_trained_model.sh
+
+# --- SAM 3D Body 本地后端 ---
+# 依赖在 external/sam-3d-body/requirements.txt 定义
+# torch>=2.0.0  # 单独安装以匹配 CUDA 版本
+# detectron2    # 从 https://dl.fbaipublicfiles.com/detectron2/wheels/cu118/torch2.0/index.html 安装
+
 # 已移除:
 # - smplx, pyrender (旧 SMPL-X 方案)
-# - mediapipe (椭球方案的关键点检测, SAM 3D Body 自带)
-# - playwright (云端调用 sam3d.org 方案, 已移除)
+# - mediapipe (椭球方案的关键点检测)
+# - playwright (云端调用 sam3d.org 方案)
+

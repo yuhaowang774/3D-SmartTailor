@@ -17,6 +17,9 @@ __pycache__/
 # Model files (download separately)
 src/keypoint/model/
 
+# External repos (clone separately, contains large model checkpoints)
+external/
+
 # IDE & OS
 .DS_Store
 Thumbs.db

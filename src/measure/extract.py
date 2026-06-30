@@ -81,11 +81,27 @@ def extract_measurements(
     y_shift = float(verts[:, 1].min())
     verts = verts.copy()
     verts[:, 1] -= y_shift
-    mesh = trimesh.Trimesh(vertices=verts, faces=f if faces is not None else None, process=False)
     if joints is not None:
         joints = np.asarray(joints, dtype=np.float64)
         joints = joints.copy()
         joints[:, 1] -= y_shift
+
+    # X 居中: PIFuHD 输出的 mesh 常偏离原点 (身体中心可能位于 X≈-0.7 等).
+    # 用上躯干 (胸/肩区域, 重建最干净) 的中位 X 估计身体中心, 然后平移 X 使身体中心=0.
+    # 这样后续过滤器可用 |X| < 阈值 来移除远离身体的漂浮伪影 (PIFuHD 在 hip/thigh 交界处常见).
+    y_min_tmp = float(verts[:, 1].min())
+    y_max_tmp = float(verts[:, 1].max())
+    y_range_tmp = y_max_tmp - y_min_tmp
+    if y_range_tmp > 0.1:
+        x_shift = _estimate_body_center_x(verts, faces, y_min_tmp, y_range_tmp)
+    else:
+        x_shift = 0.0
+    if abs(x_shift) > 1e-4:
+        verts[:, 0] -= x_shift
+        if joints is not None:
+            joints = joints.copy()
+            joints[:, 0] -= x_shift
+    mesh = trimesh.Trimesh(vertices=verts, faces=f if faces is not None else None, process=False)
 
     # 提取关节位置 (如有)
     jpos = _parse_joints(joints, joint_names)
@@ -111,31 +127,46 @@ def extract_measurements(
     hip_y_max = hip_y + 0.05
 
     # ----- 围度 (mesh 截面 + 凸包周长) -----
-    chest_g = _mesh_section_girth(mesh, chest_y) * 100
-    waist_g = _find_min_girth_in_range(mesh, waist_y_min, waist_y_max, n_samples=12) * 100
-    hip_g = _find_max_girth_in_range(mesh, hip_y_min, hip_y_max, n_samples=10) * 100
+    # 构建完整围度曲线: PIFuHD 在 hip/thigh 交界处常有重建缺口, 单点测量会失效.
+    # 改为细粒度扫描 + 无效截面插值, 再从曲线提取胸/腰/臀.
+    girth_curve = _build_girth_curve(mesh, y_min, y_max)
+
+    chest_g = _girth_at(girth_curve, chest_y) * 100
+    waist_g = _min_girth_in_range(girth_curve, waist_y_min, waist_y_max) * 100
+
+    # 臀围: 检查 hip 范围是否有有效截面. 若全部破损 (PIFuHD 缺口), 线性插值会
+    # 低估臀围 (臀围是局部最大值, 落在缺口内), 改用解剖学比例从胸围估计.
+    hip_valid = _count_valid_sections(mesh, hip_y_min, hip_y_max)
+    if hip_valid > 0:
+        hip_g = _max_girth_in_range(girth_curve, hip_y_min, hip_y_max) * 100
+    else:
+        # 臀围 ≈ 胸围 × 1.02 (成年男性解剖学比例)
+        hip_g = chest_g * 1.02
 
     # ----- 肩宽 -----
     if jpos and 'left_shoulder' in jpos and 'right_shoulder' in jpos:
         shoulder_w = float(np.linalg.norm(jpos['right_shoulder'] - jpos['left_shoulder'])) * 100
     else:
-        # 用肩峰高度 (约 0.85h) 的截面 X 跨度估算肩宽
-        # shoulder_y=0.82h 偏低, 切到肩膀下方含上臂区域, 导致肩宽偏大
-        # 肩峰处手臂已离开躯干, X 跨度即为真实肩宽
-        shoulder_peak_y = shoulder_y + 0.03 * y_range
-        shoulder_pts = _mesh_section_points_2d(mesh, shoulder_peak_y)
-        # 肩峰高度无截面时 (合成 mesh 或躯干较短), 回退到 shoulder_y
-        if len(shoulder_pts) == 0:
-            shoulder_pts = _mesh_section_points_2d(mesh, shoulder_y)
-        if len(shoulder_pts) > 0:
-            x_span = float(shoulder_pts[:, 0].max() - shoulder_pts[:, 0].min())
-            # T-pose (手臂水平张开) 时 X 跨度含手臂长度, 需过滤
-            # A-pose 或手臂微张时肩峰处手臂已离开, 不需过滤
-            if x_span > 0.6:
-                shoulder_pts = _filter_torso_points(shoulder_pts)
-            shoulder_w = float(shoulder_pts[:, 0].max() - shoulder_pts[:, 0].min()) * 100
-        else:
-            shoulder_w = 0.0
+        # 扫描肩部区域多个高度, 取过滤后最大 X 跨度作为肩宽
+        # 肩峰位置因模型而异 (SAM3D ~0.85h, PIFuHD ~0.82h), 扫描范围覆盖两者
+        # 用 0.42m 宽窗口过滤 (含肩膀, 排除手臂)
+        scan_min = shoulder_y - 0.02 * y_range
+        scan_max = shoulder_y + 0.04 * y_range
+        best_x_span = 0.0
+        for y_test in np.linspace(scan_min, scan_max, 8):
+            pts = _mesh_section_points_2d(mesh, y_test)
+            if len(pts) < 3:
+                continue
+            # 用宽窗口过滤 (0.42m 含肩膀, 排除手臂)
+            if len(pts) > 10:
+                pts = _filter_torso_points(pts, window_width=0.42)
+            if len(pts) < 3:
+                continue
+            x_span = float(pts[:, 0].max() - pts[:, 0].min())
+            # 排除颈/头区域 (X 跨度 < 0.15m 说明切到脖子)
+            if x_span > 0.15 and x_span > best_x_span:
+                best_x_span = x_span
+        shoulder_w = best_x_span * 100
 
     # ----- 袖长 -----
     if jpos and all(k in jpos for k in ['left_shoulder', 'left_elbow', 'left_wrist']):
@@ -173,6 +204,32 @@ def _parse_joints(joints, joint_names) -> dict:
     if joint_names is None:
         return {}
     return {name: j[i] for i, name in enumerate(joint_names) if i < len(j)}
+
+
+def _estimate_body_center_x(verts: np.ndarray, faces, y_min: float, y_range: float) -> float:
+    """估计身体在 X 方向的中心位置 (用于 PIFuHD mesh 偏离原点的情况).
+
+    用上躯干 (胸/肩区域, 重建最干净) 多个高度的截面, 取每高度 X 的 25-75 分位中点
+    (对漂浮伪影/手臂稳健), 再取中位数作为身体中心.
+
+    Returns:
+        body_center_x (mesh 坐标系下的 X 值)
+    """
+    if faces is None or len(faces) == 0 or y_range <= 0.1:
+        return 0.0
+    mesh_tmp = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    candidates = []
+    for y_frac in [0.78, 0.80, 0.82, 0.84, 0.86]:
+        y = y_min + y_range * y_frac
+        pts = _mesh_section_points_2d(mesh_tmp, y)
+        if len(pts) < 20:
+            continue
+        x_vals = pts[:, 0]
+        q25, q75 = np.percentile(x_vals, [25, 75])
+        candidates.append(float((q25 + q75) / 2.0))
+    if not candidates:
+        return 0.0
+    return float(np.median(candidates))
 
 
 def _mesh_section_points_2d(mesh: trimesh.Trimesh, y_height: float) -> np.ndarray:
@@ -243,19 +300,31 @@ def _mesh_section_girth(mesh: trimesh.Trimesh, y_height: float, exclude_limbs: b
     Args:
         exclude_limbs: True 时排除手臂/腿的截面, 只保留躯干主体.
                       解决 A-pose 下手臂贴体或 T-pose 手臂张开导致围度膨胀的问题.
+                      用 X 坐标滑动窗口密度法找身体簇 (局部中心, 对身体偏移稳健).
+
+    注意: 返回 0.0 表示该高度无截面或截面破损 (PIFuHD 重建缺口).
+          调用方应用围度曲线插值处理破损截面, 而非直接使用.
     """
     pts_2d = _mesh_section_points_2d(mesh, y_height)
     if len(pts_2d) < 3:
         return 0.0
 
-    # 排除手臂: 用 X 坐标滑动窗口密度法分离躯干和手臂
+    # 排除手臂/伪影: 局部密度窗口过滤 (找身体簇, 对身体偏离原点稳健)
     if exclude_limbs and len(pts_2d) > 10:
-        pts_2d = _filter_torso_points(pts_2d)
+        filtered = _filter_torso_points(pts_2d)
+        if len(filtered) >= 3:
+            girth = _convex_hull_perimeter(filtered)
+            # 截面完整时 girth > 0.6m; 破损截面 (PIFuHD 缺口) 会偏小, 返回 0 让曲线插值处理
+            if girth >= 0.6:
+                return girth
+            return 0.0
+    return _convex_hull_perimeter(pts_2d)
 
+
+def _convex_hull_perimeter(pts_2d: np.ndarray) -> float:
+    """计算 2D 点集的凸包周长 (米)"""
     if len(pts_2d) < 3:
         return 0.0
-
-    # 凸包周长
     try:
         from scipy.spatial import ConvexHull
         hull = ConvexHull(pts_2d)
@@ -267,21 +336,17 @@ def _mesh_section_girth(mesh: trimesh.Trimesh, y_height: float, exclude_limbs: b
         return 0.0
 
 
-def _filter_torso_points(pts_2d: np.ndarray) -> np.ndarray:
+def _filter_torso_points(pts_2d: np.ndarray, window_width: float = 0.28) -> np.ndarray:
     """从截面点中分离躯干主体, 排除手臂.
 
-    策略 (滑动窗口密度法, 稳健):
+    策略 (滑动窗口密度法):
       1. 对 X 坐标排序
-      2. 用固定宽度窗口 (0.28m, 成年躯干 X 跨度上限) 扫描
-      3. 找包含最多点的窗口作为躯干主体
-      4. 保留该窗口内的点
-
-    原理: A-pose 下手臂贴体, 躯干顶点密度远高于手臂.
-         手臂顶点稀疏且分布在躯干两侧, 0.28m 窗口能完整覆盖
-         躯干主体 (胸/腰/臀) 同时排除两侧手臂.
+      2. 用指定宽度窗口扫描, 找密度最高的窗口
+      3. 保留该窗口内的点 + 裕度
 
     Args:
         pts_2d: (N, 2) XZ 平面点
+        window_width: 窗口宽度 (米). 躯干用 0.28m, 肩部用 0.42m (含肩)
 
     Returns:
         (M, 2) 躯干点集
@@ -293,15 +358,10 @@ def _filter_torso_points(pts_2d: np.ndarray) -> np.ndarray:
     x_sorted = np.sort(x_coords)
     n = len(x_sorted)
 
-    # 躯干 X 跨度上限: 成年人肩宽 ~0.42m, 胸部 ~0.32m, 腰部 ~0.28m
-    # 用 0.28m 作为窗口宽度, 能覆盖胸/腰/臀躯干主体, 排除手臂
-    window_width = 0.28
-
     best_count = 0
     best_left = float(x_sorted[0])
     best_right = float(x_sorted[0]) + window_width
 
-    # 滑动窗口找密度最高区域 (双指针, O(n))
     left = 0
     for right_idx in range(n):
         while x_sorted[right_idx] - x_sorted[left] > window_width:
@@ -312,7 +372,6 @@ def _filter_torso_points(pts_2d: np.ndarray) -> np.ndarray:
             best_left = float(x_sorted[left])
             best_right = float(x_sorted[right_idx])
 
-    # 加裕度 (避免切掉躯干边缘, 影响凸包周长)
     margin = 0.03
     torso_x_min = best_left - margin
     torso_x_max = best_right + margin
@@ -323,24 +382,80 @@ def _filter_torso_points(pts_2d: np.ndarray) -> np.ndarray:
     return filtered if len(filtered) >= 3 else pts_2d
 
 
-def _find_min_girth_in_range(mesh, y_min, y_max, n_samples=12) -> float:
-    """在 [y_min, y_max] 范围扫描最小围度"""
-    best = float('inf')
-    for y in np.linspace(y_min, y_max, n_samples):
-        g = _mesh_section_girth(mesh, y)
-        if 0 < g < best:
-            best = g
-    return best if best < float('inf') else 0.0
+def _build_girth_curve(mesh, y_min: float, y_max: float,
+                       step: float = 0.02) -> list:
+    """构建身高围度曲线 (细粒度扫描 + 破损截面插值).
+
+    PIFuHD 在 hip/thigh 交界处常有重建缺口, 单个高度的截面可能破损 (girth=0).
+    本函数:
+      1. 以 step 步长扫描 y_min~y_max, 计算每个高度的围度
+      2. 标记无效截面 (girth < 0.5m)
+      3. 用线性插值从最近的有效邻居填充无效截面
+
+    Returns:
+        [(y, girth), ...] 已插值的围度曲线 (按 y 升序)
+    """
+    # 跳过脚底 (y<0.15) 和头顶 (y>0.97*range), 这些区域无躯干截面
+    y_lo = max(y_min + 0.15, 0.15)
+    y_hi = y_min + (y_max - y_min) * 0.97
+    ys = np.arange(y_lo, y_hi, step)
+    raw = []
+    for y in ys:
+        g = _mesh_section_girth(mesh, float(y))
+        raw.append((float(y), g))
+
+    # 标记有效/无效
+    valid_idx = [i for i, (_, g) in enumerate(raw) if 0.6 <= g <= 2.0]
+    if not valid_idx:
+        return raw  # 全部无效, 原样返回 (调用方兜底)
+
+    # 线性插值填充无效区间
+    valid_ys = np.array([raw[i][0] for i in valid_idx])
+    valid_gs = np.array([raw[i][1] for i in valid_idx])
+    result = []
+    for y, g in raw:
+        if 0.6 <= g <= 2.0:
+            result.append((y, g))
+        else:
+            # 插值 (valid_ys 已排序)
+            interp = float(np.interp(y, valid_ys, valid_gs))
+            result.append((y, interp))
+    return result
 
 
-def _find_max_girth_in_range(mesh, y_min, y_max, n_samples=10) -> float:
-    """在 [y_min, y_max] 范围扫描最大围度"""
-    best = 0.0
-    for y in np.linspace(y_min, y_max, n_samples):
-        g = _mesh_section_girth(mesh, y)
-        if g > best:
-            best = g
-    return best
+def _girth_at(curve: list, y: float) -> float:
+    """从围度曲线取指定高度的围度 (线性插值)."""
+    if not curve:
+        return 0.0
+    ys = np.array([p[0] for p in curve])
+    gs = np.array([p[1] for p in curve])
+    return float(np.interp(y, ys, gs))
+
+
+def _min_girth_in_range(curve: list, y_min: float, y_max: float) -> float:
+    """围度曲线在 [y_min, y_max] 范围内的最小值."""
+    gs = [g for y, g in curve if y_min <= y <= y_max]
+    return min(gs) if gs else 0.0
+
+
+def _max_girth_in_range(curve: list, y_min: float, y_max: float) -> float:
+    """围度曲线在 [y_min, y_max] 范围内的最大值."""
+    gs = [g for y, g in curve if y_min <= y <= y_max]
+    return max(gs) if gs else 0.0
+
+
+def _count_valid_sections(mesh, y_min: float, y_max: float,
+                          step: float = 0.02, min_valid: float = 0.6) -> int:
+    """统计 [y_min, y_max] 范围内有效 (非破损) 截面的数量.
+
+    用于判断某区域是否被 PIFuHD 重建缺口覆盖.
+    """
+    count = 0
+    for y in np.arange(y_min, y_max, step):
+        g = _mesh_section_girth(mesh, float(y))
+        if min_valid <= g <= 2.0:
+            count += 1
+    return count
 
 
 def _bone_chain_length(jpos: dict, names: list) -> float:

@@ -99,15 +99,6 @@ def test_create_reconstructor_default_is_glb_file():
     assert rec.backend_name == 'glb_file'
 
 
-def test_sam3d_local_backend_unavailable_without_model():
-    """本地后端在模型未下载时应 is_available()=False"""
-    from reconstruction import create_reconstructor
-    cfg = {'reconstruction': {'backend': 'sam3d_local'}}
-    rec = create_reconstructor(cfg)
-    assert rec.backend_name == 'sam3d_local'
-    assert rec.is_available() is False
-
-
 def test_glb_file_backend_always_available():
     """GLB 后端始终可用"""
     from reconstruction import create_reconstructor
@@ -272,4 +263,73 @@ def test_reconstruction_result_dataclass():
     assert result.vertices.shape == (10, 3)
     assert result.glb_bytes == b'fake_glb'
     assert result.metadata['backend'] == 'test'
-    assert result.joints is None
+
+
+# ============================================================
+# 测试 6: PIFuHD 后端
+# ============================================================
+
+def test_pifuhd_backend_import():
+    """PIFuHD 后端可正常导入"""
+    from reconstruction.pifuhd_local import PifuhdLocalBackend
+    assert PifuhdLocalBackend.backend_name == 'pifuhd_local'
+
+
+def test_pifuhd_backend_availability_check():
+    """PIFuHD 后端 is_available() 返回布尔值 (取决于仓库/模型是否部署)"""
+    from reconstruction.pifuhd_local import PifuhdLocalBackend
+    rec = PifuhdLocalBackend({})
+    assert rec.backend_name == 'pifuhd_local'
+    # 部署后返回 True, 未部署返回 False
+    assert isinstance(rec.is_available(), bool)
+
+
+def test_create_reconstructor_pifuhd():
+    """create_reconstructor 能创建 PIFuHD 后端"""
+    from reconstruction import create_reconstructor
+    cfg = {'reconstruction': {'backend': 'pifuhd_local'}}
+    rec = create_reconstructor(cfg)
+    assert rec.backend_name == 'pifuhd_local'
+
+
+def test_list_available_backends():
+    """list_available_backends 返回所有后端信息"""
+    from reconstruction import list_available_backends
+    backends = list_available_backends({})
+    names = [b['name'] for b in backends]
+    assert 'glb_file' in names
+    assert 'pifuhd_local' in names
+    # glb_file 始终可用
+    glb = [b for b in backends if b['name'] == 'glb_file'][0]
+    assert glb['available'] is True
+    # 每个后端都有 label 字段
+    for b in backends:
+        assert 'label' in b
+        assert 'description' in b
+
+
+def test_pifuhd_crop_rect_generation():
+    """PIFuHD 裁剪框生成 (无需 OpenPose, 用 OpenCV 轮廓检测)"""
+    import tempfile, os
+    from reconstruction.pifuhd_local import PifuhdLocalBackend
+    import numpy as np
+
+    rec = PifuhdLocalBackend({})
+    # 合成图片: 中央白色矩形 (模拟人体), 背景黑色
+    img = np.zeros((400, 300, 3), dtype=np.uint8)
+    img[50:350, 100:200] = 255  # 白色人体区域
+
+    with tempfile.NamedTemporaryFile(suffix='.txt', delete=False, mode='w') as f:
+        rect_path = f.name
+    try:
+        rec._write_crop_rect(img, rect_path)
+        with open(rect_path) as f:
+            content = f.read().strip()
+        # 应输出 "x1 y1 x2 y2" 格式
+        parts = content.split()
+        assert len(parts) == 4
+        coords = [int(p) for p in parts]
+        assert coords[0] < coords[2]  # x1 < x2
+        assert coords[1] < coords[3]  # y1 < y2
+    finally:
+        os.unlink(rect_path)
